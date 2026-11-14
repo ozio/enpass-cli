@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // ComputeTOTP returns the current RFC 6238 code for the given field value.
@@ -21,6 +22,9 @@ import (
 // optional period/digits/algorithm parameters. Returns an error if the value
 // can't be parsed as a TOTP secret.
 func ComputeTOTP(value string, now time.Time) (string, error) {
+	if now.Unix() < 0 {
+		return "", fmt.Errorf("TOTP time precedes Unix epoch")
+	}
 	secret, period, digits, algo, err := parseTOTPValue(value)
 	if err != nil {
 		return "", err
@@ -43,7 +47,7 @@ func ComputeTOTP(value string, now time.Time) (string, error) {
 	case "SHA512":
 		newHash = sha512.New
 	default:
-		return "", fmt.Errorf("unsupported TOTP algorithm: %s", algo)
+		return "", fmt.Errorf("unsupported TOTP algorithm")
 	}
 
 	counter := uint64(now.Unix()) / uint64(period)
@@ -81,22 +85,37 @@ func parseTOTPValue(value string) (secret string, period, digits int, algo strin
 
 	u, perr := url.Parse(value)
 	if perr != nil {
-		return "", 0, 0, "", fmt.Errorf("invalid otpauth URI: %w", perr)
+		return "", 0, 0, "", fmt.Errorf("invalid otpauth URI")
 	}
-	q := u.Query()
+	if !strings.EqualFold(u.Scheme, "otpauth") || !strings.EqualFold(u.Host, "totp") || u.User != nil || u.Fragment != "" {
+		return "", 0, 0, "", fmt.Errorf("expected an otpauth TOTP URI")
+	}
+	q, qerr := url.ParseQuery(u.RawQuery)
+	if qerr != nil {
+		return "", 0, 0, "", fmt.Errorf("invalid otpauth parameters")
+	}
+	for _, name := range []string{"secret", "period", "digits", "algorithm"} {
+		if len(q[name]) > 1 || (q.Has(name) && q.Get(name) == "") {
+			return "", 0, 0, "", fmt.Errorf("duplicate or empty otpauth parameter")
+		}
+	}
 	secret = q.Get("secret")
 	if secret == "" {
 		return "", 0, 0, "", fmt.Errorf("otpauth URI has no secret")
 	}
 	if p := q.Get("period"); p != "" {
-		if n, perr := strconv.Atoi(p); perr == nil && n > 0 {
-			period = n
+		n, err := strconv.Atoi(p)
+		if err != nil || n <= 0 {
+			return "", 0, 0, "", fmt.Errorf("invalid TOTP period")
 		}
+		period = n
 	}
 	if d := q.Get("digits"); d != "" {
-		if n, perr := strconv.Atoi(d); perr == nil && n > 0 {
-			digits = n
+		n, err := strconv.Atoi(d)
+		if err != nil || n < 6 || n > 8 {
+			return "", 0, 0, "", fmt.Errorf("TOTP digits must be between 6 and 8")
 		}
+		digits = n
 	}
 	if a := q.Get("algorithm"); a != "" {
 		algo = a
@@ -106,7 +125,12 @@ func parseTOTPValue(value string) (secret string, period, digits int, algo strin
 
 func normalizeBase32(secret string) string {
 	secret = strings.ToUpper(secret)
-	secret = strings.ReplaceAll(secret, " ", "")
+	secret = strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, secret)
 	secret = strings.ReplaceAll(secret, "-", "")
 	if rem := len(secret) % 8; rem != 0 {
 		secret += strings.Repeat("=", 8-rem)

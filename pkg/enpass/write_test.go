@@ -10,17 +10,16 @@ import (
 
 func copyTestVault(t *testing.T) string {
 	t.Helper()
-	tmpDir, err := os.MkdirTemp("", "enpass-test-*")
-	if err != nil {
-		t.Fatalf("could not create temp dir: %v", err)
+	tmpDir := t.TempDir()
+	for _, name := range []string{"vault.enpassdb", "vault.json"} {
+		data, err := os.ReadFile(filepath.Join("../../test", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, name), data, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
-
-	// Copy vault files
-	srcDB, _ := os.ReadFile("../../test/vault.enpassdb")
-	srcJSON, _ := os.ReadFile("../../test/vault.json")
-
-	os.WriteFile(filepath.Join(tmpDir, "vault.enpassdb"), srcDB, 0600)
-	os.WriteFile(filepath.Join(tmpDir, "vault.json"), srcJSON, 0600)
 
 	return tmpDir
 }
@@ -37,7 +36,7 @@ func TestVault_CreateEntry(t *testing.T) {
 
 	credentials := &VaultCredentials{Password: testPassword}
 	if err := vault.Open(credentials); err != nil {
-		t.Skipf("skipping test: could not open vault (environmental issue): %v", err)
+		t.Fatalf("could not open fixture vault: %v", err)
 	}
 
 	entry := &EntryData{
@@ -95,7 +94,7 @@ func TestVault_TrashEntry(t *testing.T) {
 
 	credentials := &VaultCredentials{Password: testPassword}
 	if err := vault.Open(credentials); err != nil {
-		t.Skipf("skipping test: could not open vault (environmental issue): %v", err)
+		t.Fatalf("could not open fixture vault: %v", err)
 	}
 
 	// Get existing entry
@@ -140,7 +139,7 @@ func TestVault_RestoreEntry(t *testing.T) {
 
 	credentials := &VaultCredentials{Password: testPassword}
 	if err := vault.Open(credentials); err != nil {
-		t.Skipf("skipping test: could not open vault (environmental issue): %v", err)
+		t.Fatalf("could not open fixture vault: %v", err)
 	}
 
 	// Get and trash an entry
@@ -171,7 +170,7 @@ func TestVault_DeleteEntry(t *testing.T) {
 
 	credentials := &VaultCredentials{Password: testPassword}
 	if err := vault.Open(credentials); err != nil {
-		t.Skipf("skipping test: could not open vault (environmental issue): %v", err)
+		t.Fatalf("could not open fixture vault: %v", err)
 	}
 
 	// Create a new entry to delete
@@ -210,12 +209,14 @@ func TestVault_UpdateEntry(t *testing.T) {
 
 	credentials := &VaultCredentials{Password: testPassword}
 	if err := vault.Open(credentials); err != nil {
-		t.Skipf("skipping test: could not open vault (environmental issue): %v", err)
+		t.Fatalf("could not open fixture vault: %v", err)
 	}
 
-	// Get existing entry
-	card, _ := vault.GetEntry("password", []string{"Whatever"}, true)
-	originalUUID := card.UUID
+	// A freshly created entry has one unambiguous password field.
+	originalUUID, err := vault.CreateEntry(&EntryData{Title: "Before edit", Password: "old password"})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	updates := &EntryData{
 		Title:    "Updated Title",

@@ -99,6 +99,39 @@ parameters) are supported. If the stored value can't be parsed, `show`
 prints `<dynamic TOTP value>` instead of a code so the user knows the field
 holds a generated value rather than a static one.
 
+Editing and adding TOTP
+-----
+Flags may appear before or after commands and filters. Use `--` before literal
+filters that begin with a dash.
+
+```sh
+# Create with a base32 secret or an otpauth://totp/... URI.
+enp create -title="My Service" -login="user@example.com" -totp="BASE32_SECRET"
+
+# Prefer stdin for real secrets to keep them out of process arguments.
+# Supply one secret ending at EOF; a final newline is stripped.
+enp edit "My Service" -totp-stdin -force
+enp edit "My Service" -password-stdin -force
+
+# Clear fields explicitly. Empty -notes=, -url=, -login= and -totp= also clear.
+enp edit "My Service" -clear=totp,notes -force
+```
+
+TOTP supports SHA1/SHA256/SHA512, 6–8 digits and positive periods. HOTP and
+malformed, duplicate or empty recognized parameters are rejected. `list -detailed`
+masks the secret; `show -detailed` includes the secret and generated code.
+
+Edits reject ambiguous fields. Password changes are refused when replacing the
+item key could damage other password fields or history; use the native app for
+those entries. A failed edit rolls back the complete patch. `-nonInteractive`
+requires `-force` when confirmation would be needed. Only one stdin secret option
+may be used per invocation; stdin is limited to 64 KiB.
+
+Writes operate directly on the database. Current native-app and cloud-sync
+compatibility is **not yet verified**: use a disposable or backed-up offline
+vault with Enpass closed. See the [application investigation](docs/enpass-internals-2026-11-14.md)
+for evidence, implemented fixes and remaining work.
+
 Environment Variables
 -----
 | Name | Description |

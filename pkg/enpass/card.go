@@ -102,6 +102,9 @@ func (c *Card) Decrypt() (string, error) {
 
 	// The key object is saved in binary from and actually consists of the
 	// AES key (32 bytes) and a nonce (12 bytes) for GCM
+	if len(c.itemKey) != 44 {
+		return "", errors.New("invalid or missing item encryption key")
+	}
 	key := c.itemKey[:32]
 	nonce := c.itemKey[32:]
 

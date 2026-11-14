@@ -61,3 +61,24 @@ func TestComputeTOTP_RejectsBadInput(t *testing.T) {
 		}
 	}
 }
+
+func TestComputeTOTPRejectsMalformedParameters(t *testing.T) {
+	for _, suffix := range []string{"digits=", "period=", "algorithm=", "digits=0", "digits=5", "digits=9", "digits=32", "digits=abc", "period=0", "period=-1", "period=abc", "algorithm=MD5", "secret=JBSWY3DPEHPK3PXP", "digits=6&digits=8"} {
+		value := "otpauth://totp/Example?secret=JBSWY3DPEHPK3PXP&" + suffix
+		if _, err := ComputeTOTP(value, time.Unix(59, 0)); err == nil {
+			t.Errorf("accepted %s", suffix)
+		}
+	}
+	if _, err := ComputeTOTP("otpauth://hotp/Example?secret=JBSWY3DPEHPK3PXP", time.Unix(59, 0)); err == nil {
+		t.Fatal("HOTP accepted")
+	}
+}
+
+func TestDecryptMalformedKeyDoesNotPanic(t *testing.T) {
+	for _, size := range []int{0, 1, 31, 32, 43, 45} {
+		c := Card{Type: "password", value: "00", itemKey: make([]byte, size)}
+		if _, err := c.Decrypt(); err == nil {
+			t.Errorf("accepted key size %d", size)
+		}
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -77,13 +78,17 @@ type Args struct {
 	clipboardPrimary *bool
 	field            *string
 	// write command flags
-	title    *string
-	login    *string
-	password *string
-	url      *string
-	notes    *string
-	category *string
-	force    *bool
+	title         *string
+	login         *string
+	password      *string
+	url           *string
+	notes         *string
+	category      *string
+	force         *bool
+	totp          *string
+	clear         *string
+	passwordStdin *bool
+	totpStdin     *bool
 }
 
 type credentialStore interface {
@@ -110,12 +115,21 @@ func (args *Args) parse() {
 	// write command flags
 	args.title = flag.String("title", "", "Entry title (for create/edit).")
 	args.login = flag.String("login", "", "Username or email (for create/edit).")
-	args.password = flag.String("password", "", "Password (for create/edit). Prompts if flag present without value.")
+	args.password = flag.String("password", "", "Password (for create/edit). Use -password= to prompt during edit.")
 	args.url = flag.String("url", "", "URL (for create/edit).")
 	args.notes = flag.String("notes", "", "Notes (for create/edit).")
 	args.category = flag.String("category", "", "Category (for create/edit).")
 	args.force = flag.Bool("force", false, "Skip confirmation prompts.")
-	flag.Parse()
+	args.totp = flag.String("totp", "", "TOTP base32 secret or otpauth URI (for create/edit).")
+	args.clear = flag.String("clear", "", "Comma-separated fields to clear: login,password,url,notes,totp (edit only).")
+	args.passwordStdin = flag.Bool("password-stdin", false, "Read the password from stdin (for create/edit).")
+	args.totpStdin = flag.Bool("totp-stdin", false, "Read the TOTP secret from stdin (for create/edit).")
+	reordered, err := interspersedFlags(flag.CommandLine, os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	flag.CommandLine.Parse(reordered)
 	args.command = strings.ToLower(flag.Arg(0))
 	if len(flag.Args()) > 1 {
 		args.filters = flag.Args()[1:]
@@ -197,12 +211,12 @@ func showEntries(logger *logrus.Logger, vault *enpass.Vault, args *Args) {
 
 // entryView is one Enpass item with all of its fields grouped together.
 type entryView struct {
-	UUID     string       `json:"uuid"`
-	Title    string       `json:"title"`
-	Subtitle string       `json:"subtitle,omitempty"`
-	Category string       `json:"category,omitempty"`
-	Trashed  bool         `json:"trashed,omitempty"`
-	Fields   []fieldView  `json:"fields"`
+	UUID     string      `json:"uuid"`
+	Title    string      `json:"title"`
+	Subtitle string      `json:"subtitle,omitempty"`
+	Category string      `json:"category,omitempty"`
+	Trashed  bool        `json:"trashed,omitempty"`
+	Fields   []fieldView `json:"fields"`
 }
 
 // fieldView is a single field of an entry (username, email, password, ...).
@@ -762,70 +776,136 @@ func initializeBiometricStore(logger *logrus.Logger, args *Args) *unlock.Biometr
 	return store
 }
 
-func createEntry(logger *logrus.Logger, vault *enpass.Vault, args *Args) {
-	entry := &enpass.EntryData{
-		Title:    *args.title,
-		Username: *args.login,
-		Password: *args.password,
-		URL:      *args.url,
-		Notes:    *args.notes,
-		Category: *args.category,
-	}
-
-	// Prompt for required fields if not provided
-	if entry.Title == "" {
-		entry.Title = promptText(logger, args, "title")
-		if entry.Title == "" {
-			logger.Fatal("title is required")
+// interspersedFlags supports the documented command-before-flags syntax while
+// preserving flag values (including strings starting with '-') and -- literals.
+func interspersedFlags(fs *flag.FlagSet, input []string) ([]string, error) {
+	var options, positionals []string
+	for i := 0; i < len(input); i++ {
+		arg := input[i]
+		if arg == "--" {
+			positionals = append(positionals, input[i+1:]...)
+			break
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			positionals = append(positionals, arg)
+			continue
+		}
+		name, _, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		f := fs.Lookup(name)
+		if f == nil {
+			if name == "h" || name == "help" {
+				return []string{"-h"}, nil
+			}
+			return nil, fmt.Errorf("unknown flag: %s", name)
+		}
+		options = append(options, arg)
+		boolean, ok := f.Value.(interface{ IsBoolFlag() bool })
+		if !hasValue && !(ok && boolean.IsBoolFlag()) {
+			if i+1 >= len(input) {
+				return nil, fmt.Errorf("flag needs a value: %s", name)
+			}
+			i++
+			options = append(options, input[i])
 		}
 	}
+	return append(append(options, "--"), positionals...), nil
+}
 
-	// Prompt for password if flag was not provided
-	if *args.password == "" {
+func entryData(args *Args, input io.Reader) (*enpass.EntryData, error) {
+	if *args.passwordStdin && *args.totpStdin {
+		return nil, fmt.Errorf("use only one secret stdin option at a time")
+	}
+	if (*args.passwordStdin && isFlagPassed("password")) || (*args.totpStdin && isFlagPassed("totp")) {
+		return nil, fmt.Errorf("cannot combine a secret flag with its stdin option")
+	}
+	data := &enpass.EntryData{Title: *args.title, Username: *args.login, Password: *args.password,
+		URL: *args.url, Notes: *args.notes, Category: *args.category, TOTP: *args.totp}
+	if *args.clear != "" {
+		for _, name := range strings.Split(*args.clear, ",") {
+			data.ClearFields = append(data.ClearFields, strings.TrimSpace(name))
+		}
+	}
+	for name, value := range map[string]string{"login": data.Username, "url": data.URL, "notes": data.Notes, "totp": data.TOTP} {
+		if isFlagPassed(name) && value == "" {
+			data.ClearFields = append(data.ClearFields, name)
+		}
+	}
+	if isFlagPassed("title") && strings.TrimSpace(data.Title) == "" {
+		return nil, fmt.Errorf("title cannot be empty")
+	}
+	if *args.passwordStdin || *args.totpStdin {
+		// Bound untrusted input and strip a single terminal line ending only.
+		value, err := io.ReadAll(io.LimitReader(input, 65537))
+		if err != nil || len(value) > 65536 {
+			return nil, fmt.Errorf("could not read secret from stdin (maximum 64 KiB)")
+		}
+		secret := strings.TrimSuffix(strings.TrimSuffix(string(value), "\n"), "\r")
+		if secret == "" {
+			return nil, fmt.Errorf("stdin secret is empty; use -clear to remove a field")
+		}
+		if *args.passwordStdin {
+			data.Password = secret
+		} else {
+			data.TOTP = secret
+		}
+	}
+	return data, nil
+}
+
+func createEntry(logger *logrus.Logger, vault *enpass.Vault, args *Args) {
+	entry, err := entryData(args, os.Stdin)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	// Empty options during creation mean omitted fields, not clear operations.
+	if *args.clear != "" {
+		logger.Fatal("-clear is only supported with edit")
+	}
+	entry.ClearFields = nil
+	if entry.Title == "" {
+		entry.Title = promptText(logger, args, "title")
+	}
+	if entry.Password == "" && !*args.passwordStdin && !isFlagPassed("password") && entry.TOTP == "" {
 		entry.Password = prompt(logger, args, "password")
 	}
-
-	uuid, err := vault.CreateEntry(entry)
+	id, err := vault.CreateEntry(entry)
 	if err != nil {
 		logger.WithError(err).Fatal("could not create entry")
 	}
-
-	logger.Printf("Created entry: %s (UUID: %s)", entry.Title, uuid)
+	logger.Printf("Created entry: %s (UUID: %s)", entry.Title, id)
 }
 
 func editEntry(logger *logrus.Logger, vault *enpass.Vault, args *Args) {
-	card, err := vault.GetEntry(*args.cardType, args.filters, true)
+	if len(args.filters) == 0 {
+		logger.Fatal("edit requires an entry filter")
+	}
+	// Selection must also work for TOTP-only and username-only entries.
+	typeFilter := ""
+	if isFlagPassed("type") {
+		typeFilter = *args.cardType
+	}
+	card, err := vault.GetEntry(typeFilter, args.filters, true)
 	if err != nil {
 		logger.WithError(err).Fatal("could not find unique entry to edit")
 	}
-
-	updates := &enpass.EntryData{
-		Title:    *args.title,
-		Username: *args.login,
-		URL:      *args.url,
-		Notes:    *args.notes,
-		Category: *args.category,
+	updates, err := entryData(args, os.Stdin)
+	if err != nil {
+		logger.Fatal(err)
 	}
-
-	// Handle password - prompt if flag was passed but empty
 	if isFlagPassed("password") && *args.password == "" {
 		updates.Password = prompt(logger, args, "new password")
-	} else {
-		updates.Password = *args.password
-	}
-
-	// Confirm if changing password
-	if updates.Password != "" && !*args.force {
-		if !confirm(logger, args, fmt.Sprintf("Update password for '%s'?", card.Title)) {
-			logger.Info("cancelled")
-			return
+		if updates.Password == "" {
+			logger.Fatal("password input is empty; use -clear password to remove it")
 		}
 	}
-
+	if (updates.Password != "" || updates.TOTP != "" || len(updates.ClearFields) > 0) && !*args.force {
+		if !confirm(logger, args, fmt.Sprintf("Update sensitive or cleared fields for '%s'?", card.Title)) {
+			logger.Fatal("update cancelled; use -force for noninteractive writes")
+		}
+	}
 	if err := vault.UpdateEntry(card.UUID, updates); err != nil {
 		logger.WithError(err).Fatal("could not update entry")
 	}
-
 	logger.Printf("Updated entry: %s", card.Title)
 }
 
